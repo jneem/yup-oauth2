@@ -16,20 +16,20 @@
 use crate::error::Error;
 use crate::types::TokenInfo;
 
-use std::{io, path::PathBuf, error::Error as StdError};
+use std::{error::Error as StdError, io, path::PathBuf};
 
+use http::Uri;
 use hyper::client::connect::Connection;
 use hyper::header;
-use http::Uri;
 use rustls::{
     self,
     sign::{self, SigningKey},
     PrivateKey,
 };
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tower_service::Service;
-use time::OffsetDateTime;
 use url::form_urlencoded;
 
 const GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
@@ -101,18 +101,19 @@ struct Claims<'a> {
     iat: i64,
     #[serde(rename = "sub")]
     subject: Option<&'a str>,
-    scope: String,
+    scope: Option<String>,
+    target_audience: Option<&'a str>,
 }
 
 impl<'a> Claims<'a> {
-    fn new<T>(key: &'a ServiceAccountKey, scopes: &[T], subject: Option<&'a str>) -> Self
-    where
-        T: AsRef<str>,
-    {
+    fn new(
+        key: &'a ServiceAccountKey,
+        scope: Option<String>,
+        target_audience: Option<&'a str>,
+        subject: Option<&'a str>,
+    ) -> Self {
         let iat = OffsetDateTime::now_utc().unix_timestamp();
         let expiry = iat + 3600 - 5; // Max validity is 1h.
-
-        let scope = crate::helper::join(scopes, " ");
         Claims {
             iss: &key.client_email,
             aud: &key.token_uri,
@@ -120,7 +121,28 @@ impl<'a> Claims<'a> {
             iat,
             subject,
             scope,
+            target_audience,
         }
+    }
+
+    fn new_with_scopes<T>(
+        key: &'a ServiceAccountKey,
+        scopes: &[T],
+        subject: Option<&'a str>,
+    ) -> Self
+    where
+        T: AsRef<str>,
+    {
+        let scope = crate::helper::join(scopes, " ");
+        Claims::new(key, Some(scope), None, subject)
+    }
+
+    fn new_with_target_audience(
+        key: &'a ServiceAccountKey,
+        audience: &'a str,
+        subject: Option<&'a str>,
+    ) -> Self {
+        Claims::new(key, None, Some(audience), subject)
     }
 }
 
@@ -164,6 +186,7 @@ impl JWTSigner {
 pub struct ServiceAccountFlowOpts {
     pub(crate) key: FlowOptsKey,
     pub(crate) subject: Option<String>,
+    pub(crate) access_token: bool,
 }
 
 /// The source of the key given to ServiceAccountFlowOpts.
@@ -179,6 +202,7 @@ pub struct ServiceAccountFlow {
     key: ServiceAccountKey,
     subject: Option<String>,
     signer: JWTSigner,
+    access_token: bool,
 }
 
 impl ServiceAccountFlow {
@@ -193,6 +217,7 @@ impl ServiceAccountFlow {
             key,
             subject: opts.subject,
             signer,
+            access_token: opts.access_token,
         })
     }
 
@@ -209,7 +234,12 @@ impl ServiceAccountFlow {
         S::Future: Send + Unpin + 'static,
         S::Error: Into<Box<dyn StdError + Send + Sync>>,
     {
-        let claims = Claims::new(&self.key, scopes, self.subject.as_deref());
+        let claims = if self.access_token {
+            Claims::new_with_scopes(&self.key, scopes, self.subject.as_deref())
+        } else {
+            let aud = scopes[0].as_ref(); // FIXME: panic
+            Claims::new_with_target_audience(&self.key, aud, self.subject.as_deref())
+        };
         let signed = self.signer.sign_claims(&claims).map_err(|_| {
             Error::LowLevelError(io::Error::new(
                 io::ErrorKind::Other,
@@ -246,6 +276,7 @@ mod tests {
         let acc = ServiceAccountFlow::new(ServiceAccountFlowOpts {
             key: FlowOptsKey::Path(TEST_PRIVATE_KEY_PATH.into()),
             subject: None,
+            access_token: true,
         })
         .await
         .unwrap();
@@ -278,13 +309,13 @@ mod tests {
             .await
             .unwrap();
         let scopes = vec!["scope1", "scope2", "scope3"];
-        let claims = Claims::new(&key, &scopes, None);
+        let claims = Claims::new_with_scopes(&key, &scopes, None);
 
         assert_eq!(
             claims.iss,
             "oauth2-public-test@sanguine-rhythm-105020.iam.gserviceaccount.com".to_string()
         );
-        assert_eq!(claims.scope, "scope1 scope2 scope3".to_string());
+        assert_eq!(claims.scope, Some("scope1 scope2 scope3".to_string()));
         assert_eq!(
             claims.aud,
             "https://accounts.google.com/o/oauth2/token".to_string()
@@ -301,7 +332,7 @@ mod tests {
             .unwrap();
         let scopes = vec!["scope1", "scope2", "scope3"];
         let signer = JWTSigner::new(&key.private_key).unwrap();
-        let claims = Claims::new(&key, &scopes, None);
+        let claims = Claims::new_with_scopes(&key, &scopes, None);
         let signature = signer.sign_claims(&claims);
 
         assert!(signature.is_ok());

@@ -291,6 +291,7 @@ impl ServiceAccountAuthenticator {
             ServiceAccountFlowOpts {
                 key: service_account::FlowOptsKey::Key(service_account_key),
                 subject: None,
+                access_token: true,
             },
             client,
         )
@@ -328,6 +329,7 @@ impl ApplicationDefaultCredentialsAuthenticator {
         Ok(ServiceAccountFlowOpts {
             key: service_account::FlowOptsKey::Path(key_path.into()),
             subject: None,
+            access_token: true,
         })
     }
 
@@ -707,6 +709,13 @@ impl<C> AuthenticatorBuilder<C, ServiceAccountFlowOpts> {
             },
             ..self
         }
+    }
+
+    /// Configure this authenticator to request an ID token (rather an an access token,
+    /// as is the default).
+    pub fn request_id_token(mut self) -> Self {
+        self.auth_flow.access_token = false;
+        self
     }
 
     /// Create the authenticator.

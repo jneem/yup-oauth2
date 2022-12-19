@@ -11,12 +11,13 @@ async fn main() {
             .await
             .expect("Unable to create instance metadata authenticator"),
         ApplicationDefaultCredentialsTypes::ServiceAccount(auth) => auth
+            .request_id_token()
             .build()
             .await
             .expect("Unable to create service account authenticator"),
     };
     let scopes = &["https://www.googleapis.com/auth/pubsub"];
 
-    let tok = auth.token(scopes).await.unwrap();
+    let tok = auth.id_token(scopes).await.unwrap();
     println!("token is: {:?}", tok);
 }
